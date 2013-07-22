@@ -1,0 +1,39 @@
+#!/usr/bin/env python
+
+import optparse
+import subprocess
+import sys
+
+
+o = optparse.OptionParser()
+o.add_option("-g", "-group", type="int", default=16)
+conf, args = o.parse_args()
+sub_cmd = args
+
+
+def make_group(inputs):
+    group_input = "_pid=\n"
+    group_input += "".join("(\n" + job_input + "\n) & \n_pid=\"$_pid \"$!\n"
+                          for job_input in inputs)
+    group_input += "for p in $_pid; do wait $p; done"
+    return group_input
+
+
+def make_groups(inputs, size=16):
+    group = []
+    for line in inputs:
+        group.append(line)
+        if len(group) == 16:
+            yield make_group(group)
+            group = []
+
+
+for group in make_groups(sys.stdin):
+
+    # submit group
+    proc = subprocess.call(sub_cmd, stdin=subprocess.PIPE)
+    proc.stdin.write(group)
+    proc.stdin.close()
+
+
+
