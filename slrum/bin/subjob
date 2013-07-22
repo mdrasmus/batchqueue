@@ -13,11 +13,15 @@ args = sys.argv[1:]
 if "--" in args:
     i = args.index("--")
     job_cmd = " ".join(args[i+1:])
-    args = args[:i-1]
+    args = args[:i]
 else:
     job_cmd = None
 
+# call batch command
 proc = subprocess.Popen([BATCH_CMD] + args, stdin=subprocess.PIPE)
+
+# print a hash-bang
+proc.stdin.write("#!/bin/bash\n")
 
 if job_cmd:
     # read job from args

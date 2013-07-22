@@ -6,13 +6,14 @@ import sys
 
 
 o = optparse.OptionParser()
-o.add_option("-g", "-group", type="int", default=16)
+o.add_option("-g", "--group", type="int", default=16)
 conf, args = o.parse_args()
 sub_cmd = args
 
 
 def make_group(inputs):
-    group_input = "_pid=\n"
+    group_input = "#!/bin/bash\n"
+    group_input += "_pid=\n"
     group_input += "".join("(\n" + job_input + "\n) & \n_pid=\"$_pid \"$!\n"
                           for job_input in inputs)
     group_input += "for p in $_pid; do wait $p; done"
@@ -31,7 +32,7 @@ def make_groups(inputs, size=16):
 for group in make_groups(sys.stdin):
 
     # submit group
-    proc = subprocess.call(sub_cmd, stdin=subprocess.PIPE)
+    proc = subprocess.Popen(sub_cmd, stdin=subprocess.PIPE)
     proc.stdin.write(group)
     proc.stdin.close()
 
