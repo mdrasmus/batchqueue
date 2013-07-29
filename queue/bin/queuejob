@@ -1,0 +1,156 @@
+#!/usr/bin/env python
+
+import json
+import optparse
+import os
+from subprocess import call
+import sys
+import tempfile
+import time
+
+# config
+JOBSDIR = os.environ.get("JOBS_DIR",
+                         os.path.join(os.environ["HOME"], "jobs"))
+
+o = optparse.OptionParser()
+o.add_option("--nostdin", action="store_true", default=False)
+o.add_option("-g", "--group")
+o.add_option("-s", "--groupsize", default=8, type="int")
+o.add_option("-l", "--list", action="store_true",
+             help="list jobs for grouping")
+
+conf, args = o.parse_args()
+
+
+#=============================================================================
+# shell functions
+
+def doublequote(text):
+    """Wrap argument in doublequotes with propper escaping."""
+    return '"' + text.replace("\\", "\\\\").replace('"', '\\"').replace("$", "\\$") + '"'
+
+
+def make_cmdstr(cmd):
+    """
+    Make a command string with proper argument quoting.
+    """
+    return " ".join(doublequote(x) for x in cmd)
+
+
+def unique_eof(lines):
+    """
+    Find an End-of-file token not found within lines.
+    """
+    if ("EOF\n" not in lines) and ("EOF" not in lines):
+        return "EOF"
+
+    i = 2
+    while True:
+        eof = "EOF%d" % i
+        if (eofstr + "\n" not in lines) and (eofstr not in lines):
+            return eofstr
+        i += 1
+
+#=============================================================================
+# job creation
+
+def write_job(out, cmd, input_lines=None):
+    """Write a job to a stream."""
+
+    cmdstr = make_cmdstr(cmd)
+
+    # Add HERE-DOC if input is given
+    if input_lines:
+        eof = unique_eof(input_lines)
+        cmdstr += " <<\"" + eof + "\"\n" + \
+             "".join(input_lines) + "\n" + eof
+
+    out.write("# submitted: %s\n" % time.strftime("%Y/%m/%d %H:%M:%S"))
+    out.write("cd %s\n" % doublequote(os.getcwd()))
+    out.write(cmdstr)
+
+
+def queue_job(jobsdir, cmd, input_lines):
+    prefix = time.strftime("%Y%m%d_%H%M%S_")
+    fd, name = tempfile.mkstemp(".sh", prefix, jobsdir)
+    with os.fdopen(fd, "w") as out:
+        write_job(out, cmd, input_lines)
+    return name
+
+
+#=============================================================================
+# group job creation
+
+def queue_group_job(groupdir, group, size, cmd, input_lines):
+    """
+    Queue a group job.
+    """
+    text = json.dumps({"group": group,
+                       "size": size,
+                       "cmd": cmd,
+                       "cwd": os.getcwd(),
+                       "time": time.strftime("%Y/%m/%d %H:%M:%S"),
+                       "input": "".join(input_lines)})
+
+    prefix = time.strftime("%Y%m%d_%H%M%S_")
+    fd, name = tempfile.mkstemp(".json", prefix, groupdir)
+    os.write(fd, text)
+    os.close(fd)
+
+
+def read_job(jobfile):
+    """
+    Read a job file.
+    """
+    job = json.loads(open(jobfile).read())
+    job["file"] = jobfile
+    return job
+
+
+def get_group_job_files(groupdir):
+    """
+    Get all group jobs.
+    """
+    files = [os.path.join(groupdir, x) for x in os.listdir(groupdir)]
+    files.sort()
+    return files
+
+
+def get_group_jobs(groupdir):
+    """
+    Read all group jobs.
+    """
+    return [read_job(x) for x in get_group_job_files(groupdir)]
+
+
+#=============================================================================
+
+# ensure job directories are present
+jobsdir = JOBSDIR
+groupdir = os.path.join(jobsdir, "groups")
+if not os.path.exists(jobsdir):
+    os.mkdir(jobsdir)
+if not os.path.exists(groupdir):
+    os.mkdir(groupdir)
+
+
+if conf.list:
+    # list groups
+    for i, job in enumerate(get_group_jobs(groupdir)):
+        print "\t".join(map(str, [i+1, job["group"], job.get("time", "")]))
+    sys.exit(0)
+
+
+# get command and input lines
+cmd = args
+if not conf.nostdin:
+    input_lines = sys.stdin.readlines()
+else:
+    input_lines = []
+
+
+if not conf.group:
+    # make simple job
+    queue_job(jobsdir, cmd, input_lines)
+else:
+    queue_group_job(groupdir, conf.group, conf.groupsize, cmd, input_lines)

@@ -29,12 +29,9 @@ def make_groups(inputs, size=16):
             group = []
 
 
-for group in make_groups(sys.stdin):
+for group in make_groups(sys.stdin, size=conf.group):
 
     # submit group
     proc = subprocess.Popen(sub_cmd, stdin=subprocess.PIPE)
     proc.stdin.write(group)
     proc.stdin.close()
-
-
-
