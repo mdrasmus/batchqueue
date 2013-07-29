@@ -1,29 +1,50 @@
 #!/usr/bin/env python
 
+from collections import defaultdict
 import json
 import optparse
 import os
+import shutil
 from subprocess import call
+from subprocess import check_call
+from subprocess import Popen
+from subprocess import PIPE
 import sys
 import tempfile
 import time
 
 # config
-JOBSDIR = os.environ.get("JOBS_DIR",
+CURRENT_JOBS_CMD = "showq"
+WHOAMI_CMD =  "whoami"
+POLL_RATE = 60 # seconds
+JOB_SUBMIT = "/bin/bash"
+JOBDIR = os.environ.get("JOBS_DIR",
                          os.path.join(os.environ["HOME"], "jobs"))
+
+config = {'current_jobs_cmd': CURRENT_JOBS_CMD,
+          'whoami_cmd': WHOAMI_CMD,
+          'poll_rate': POLL_RATE,
+          'job_submit_cmd': JOB_SUBMIT,
+          'jobdir': JOBSDIR)
 
 o = optparse.OptionParser()
 o.add_option("--nostdin", action="store_true", default=False)
 o.add_option("-g", "--group")
-o.add_option("-s", "--groupsize", default=8, type="int")
+o.add_option("-G", "--groupjobs", action="store_true")
+o.add_option("-r", "--run", action="store_true")
+o.add_option("-s", "--groupsize", default=16, type="int")
 o.add_option("-l", "--list", action="store_true",
              help="list jobs for grouping")
+o.add_option("-d", "--dir", metavar="jobs_directory")
+o.add_option("-j", "--maxjobs", metavar="maximum_jobs_running",
+             type="int", default=30)
 
 conf, args = o.parse_args()
 
 
 #=============================================================================
 # shell functions
+
 
 def doublequote(text):
     """Wrap argument in doublequotes with propper escaping."""
@@ -51,92 +72,268 @@ def unique_eof(lines):
             return eofstr
         i += 1
 
-#=============================================================================
-# job creation
 
-def write_job(out, cmd, input_lines=None):
-    """Write a job to a stream."""
-
-    cmdstr = make_cmdstr(cmd)
-
-    # Add HERE-DOC if input is given
-    if input_lines:
-        eof = unique_eof(input_lines)
-        cmdstr += " <<\"" + eof + "\"\n" + \
-             "".join(input_lines) + "\n" + eof
-
-    out.write("# submitted: %s\n" % time.strftime("%Y/%m/%d %H:%M:%S"))
-    out.write("cd %s\n" % doublequote(os.getcwd()))
-    out.write(cmdstr)
-
-
-def queue_job(jobsdir, cmd, input_lines):
-    prefix = time.strftime("%Y%m%d_%H%M%S_")
-    fd, name = tempfile.mkstemp(".sh", prefix, jobsdir)
-    with os.fdopen(fd, "w") as out:
-        write_job(out, cmd, input_lines)
-    return name
+def split_lines(text):
+    return [line + "\n" for line in text.split("\n")]
 
 
 #=============================================================================
-# group job creation
-
-def queue_group_job(groupdir, group, size, cmd, input_lines):
-    """
-    Queue a group job.
-    """
-    text = json.dumps({"group": group,
-                       "size": size,
-                       "cmd": cmd,
-                       "cwd": os.getcwd(),
-                       "time": time.strftime("%Y/%m/%d %H:%M:%S"),
-                       "input": "".join(input_lines)})
-
-    prefix = time.strftime("%Y%m%d_%H%M%S_")
-    fd, name = tempfile.mkstemp(".json", prefix, groupdir)
-    os.write(fd, text)
-    os.close(fd)
+# Job queue
 
 
-def read_job(jobfile):
-    """
-    Read a job file.
-    """
-    job = json.loads(open(jobfile).read())
-    job["file"] = jobfile
-    return job
+class JobQueue(object):
+    def __init__(self, jobdir='jobs',
+                 job_submit_cmd='/bin/bash',
+                 whoami_cmd='whoami',
+                 poll_rate=60,
+                 max_jobs=50,
+                 current_jobs_cmd='',
+                 init_dirs=True):
+        self._jobdir = jobdir
+        self._job_submit_cmd = job_submit_cmd
+        self._whoami_cmd = whoami_cmd
+        self._current_jobs_cmd = current_jobs_cmd
+        self._poll_rate = poll_rate
+        self._max_jobs = max_jobs
+
+        # setup directories
+        self._donedir = os.path.join(self._jobdir, "done")
+        self._groupdir = os.path.join(self._jobdir, "groups")
+
+        if init_dirs:
+            self.init_dirs()
 
 
-def get_group_job_files(groupdir):
-    """
-    Get all group jobs.
-    """
-    files = [os.path.join(groupdir, x) for x in os.listdir(groupdir)]
-    files.sort()
-    return files
+    def init_dirs(self):
+        """Create job directories."""
+
+        if not os.path.exists(self._jobdir):
+            os.mkdir(self._jobdir)
+        if not os.path.exists(self._groupdir):
+            os.mkdir(self._groupdir)
 
 
-def get_group_jobs(groupdir):
-    """
-    Read all group jobs.
-    """
-    return [read_job(x) for x in get_group_job_files(groupdir)]
+    def get_running_num_jobs(self):
+        """Return the number of jobs currently running."""
+
+        user = os.popen(self._whoami_cmd).read().strip()
+
+        try:
+            s = Popen(self._current_jobs_cmd, stdout=PIPE)
+            njobs = 0
+            for line in s.stdout:
+                if user in line:
+                    njobs += 1
+            return njobs
+        except:
+            raise Exception("cant get number of jobs right now")
+
+
+    def get_waiting_jobs(self):
+        """Return all jobs in queue."""
+        jobs = []
+        for x in os.listdir(self._jobdir):
+            fn = os.path.join(self._jobdir, x)
+            if os.path.isfile(fn):
+                jobs.append(fn)
+        jobs.sort()
+        return jobs
+
+
+    def remove_jobfile(self, jobfile):
+        """Remove a jobfile from the queue."""
+        shutil.move(jobfile, self._donedir)
+
+
+    def submit_jobfile(self, jobfile):
+        """Submit a jobfile."""
+        call([self._job_submit_cmd, jobfile])
+
+
+    def _write_job(self, out, cmd, input_lines=None):
+        """Write a job to a stream."""
+
+        cmdstr = make_cmdstr(cmd)
+
+        # Add HERE-DOC if input is given
+        if input_lines:
+            eof = unique_eof(input_lines)
+            cmdstr += " <<\"" + eof + "\"\n" + \
+                 "".join(input_lines) + "\n" + eof
+
+        out.write("# submitted: %s\n" % time.strftime("%Y/%m/%d %H:%M:%S"))
+        out.write("cd %s\n" % doublequote(os.getcwd()))
+        out.write(cmdstr)
+
+
+    def queue_job(self, cmd, input_lines):
+        """
+        Queue a command with input.
+        """
+        prefix = time.strftime("%Y%m%d_%H%M%S_")
+        fd, name = tempfile.mkstemp(".sh", prefix, self._jobdir)
+        with os.fdopen(fd, "w") as out:
+            self._write_job(out, cmd, input_lines)
+        return name
+
+
+    def read_job(self, jobfile):
+        """
+        Read a job file.
+        """
+        job = json.loads(open(jobfile).read())
+        job["file"] = jobfile
+        return job
+
+
+    def _get_group_job_files(self):
+        """
+        Get all group jobs.
+        """
+        files = [os.path.join(self._groupdir, x)
+                 for x in os.listdir(self._groupdir)]
+        files.sort()
+        return files
+
+
+    def get_group_jobs(self):
+        """
+        Read all group jobs.
+        """
+        return [self.read_job(x)
+                for x in self._get_group_job_files(self._groupdir)]
+
+
+    def _make_group_input(self, inputs):
+        group_input = "_pid=\n"
+        group_input += "".join("(\n" + job_input + "\n) & \n_pid=\"$_pid \"$!\n"
+                              for job_input in inputs)
+        group_input += "for p in $_pid; do wait $p; done"
+        return group_input
+
+
+    def queue_group_job(self, group, size, cmd, input_lines):
+        """
+        Queue a group job.
+        """
+        text = json.dumps({"group": group,
+                           "size": size,
+                           "cmd": cmd,
+                           "cwd": os.getcwd(),
+                           "time": time.strftime("%Y/%m/%d %H:%M:%S"),
+                           "input": "".join(input_lines)})
+
+        prefix = time.strftime("%Y%m%d_%H%M%S_")
+        fd, name = tempfile.mkstemp(".json", prefix, self._groupdir)
+        os.write(fd, text)
+        os.close(fd)
+
+
+    def queue_group(jobs):
+        """Bundle jobs into group and queue group"""
+
+        cmd = jobs[0]["cmd"]
+        inputs = [j["input"] for j in jobs]
+
+        group_input = self._make_group_input(inputs)
+        input_lines = split_lines(group_input)
+        groupjob = self.queue_job(cmd, input_lines, cwd=jobs[0]["cwd"])
+
+        print
+        print "create group %s (%d)" % (jobs[0]["group"], jobs[0]["size"])
+        print "  group job:", os.path.basename(_groupjob)
+        for job in jobs:
+            print "  subjob:", job["file"]
+
+        for job in jobs:
+            self.remove_job(job["file"])
+
+
+    def queue_groups(self):
+        """Create groups out of all jobs waiting for grouping"""
+
+        # cluster into groups
+        groups = defaultdict(lambda: [])
+        jobs = [x for x in self.get_group_jobs()]
+        for job in jobs:
+            groups[job["group"]].append(job)
+
+        # queue each group
+        for group, group_jobs in groups.items():
+            group_size = group_jobs[0]["size"]
+            for i in range(0, len(jobs), group_size):
+                self.queue_group(jobs[i:i+group_size])
+
+
+    def run_queue(self, maxjobs=None):
+        """Poll job queue to create groups and submit jobs"""
+
+        if not maxjobs:
+            maxjobs = self._maxjobs
+
+        while True:
+            # queue groups
+            self.queue_groups()
+
+            print
+            print "check queue", time.strftime("%Y/%m/%d %H:%M:%S")
+
+            # determine jobs
+            jobs = self.get_waiting_jobs()
+            try:
+                ncurrent = self.get_running_num_jobs()
+            except:
+                print "could not get number of current jobs, sleeping"
+                time.sleep(POLL_RATE)
+                continue
+
+            nsubmit = min(len(jobs), max(maxjobs - ncurrent, 0))
+
+            print "max jobs:", maxjobs
+            print "running: ", ncurrent
+            print "waiting: ", len(jobs)
+
+            # submit jobs
+            for i in range(nsubmit):
+                print
+                print "> submit %d:" % (i+1), os.path.basename(jobs[i])
+                self.submit_job(jobs[i])
+                self.remove_job(jobs[i])
+
+            time.sleep(POLL_RATE)
 
 
 #=============================================================================
+
+# setup config
+if conf.dir:
+    config['jobdir'] = conf.dir
+config['max_jobs'] = conf.maxjobs
+
 
 # ensure job directories are present
-jobsdir = JOBSDIR
-groupdir = os.path.join(jobsdir, "groups")
-if not os.path.exists(jobsdir):
-    os.mkdir(jobsdir)
-if not os.path.exists(groupdir):
-    os.mkdir(groupdir)
+if not os.path.exists(config['jobdir']):
+    print >>sys.stderr, "ERROR: jobs directory '%s' does not exist. Please create it." % config['jobdir']
+    print >>sys.stderr, "  mkdir %s" % config['jobdir']
+    sys.exit(1)
 
 
-if conf.list:
+# setup queue
+jobqueue = JobQueue(jobdir=**config)
+
+
+if conf.groupjobs:
+    # only group jobs
+    jobqueue.queue_groups()
+
+else if conf.run:
+    # start queue process
+    jobqueue.run_queue()
+    sys.exit(0)
+
+else if conf.list:
     # list groups
-    for i, job in enumerate(get_group_jobs(groupdir)):
+    for i, job in enumerate(self.get_group_jobs()):
         print "\t".join(map(str, [i+1, job["group"], job.get("time", "")]))
     sys.exit(0)
 
@@ -151,6 +348,6 @@ else:
 
 if not conf.group:
     # make simple job
-    queue_job(jobsdir, cmd, input_lines)
+    self.queue_job(cmd, input_lines)
 else:
-    queue_group_job(groupdir, conf.group, conf.groupsize, cmd, input_lines)
+    self.queue_group_job(conf.group, conf.groupsize, cmd, input_lines)
