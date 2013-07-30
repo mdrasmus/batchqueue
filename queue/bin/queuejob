@@ -25,16 +25,17 @@ config = {'current_jobs_cmd': CURRENT_JOBS_CMD,
           'whoami_cmd': WHOAMI_CMD,
           'poll_rate': POLL_RATE,
           'job_submit_cmd': JOB_SUBMIT,
-          'jobdir': JOBSDIR)
+          'jobdir': JOBDIR}
 
 o = optparse.OptionParser()
 o.add_option("--nostdin", action="store_true", default=False)
-o.add_option("-g", "--group")
-o.add_option("-G", "--groupjobs", action="store_true")
 o.add_option("-r", "--run", action="store_true")
-o.add_option("-s", "--groupsize", default=16, type="int")
 o.add_option("-l", "--list", action="store_true",
              help="list jobs for grouping")
+o.add_option("-c", "--clear", action="store_true")
+o.add_option("-G", "--groupjobs", action="store_true")
+o.add_option("-g", "--group")
+o.add_option("-s", "--groupsize", default=16, type="int")
 o.add_option("-d", "--dir", metavar="jobs_directory")
 o.add_option("-j", "--maxjobs", metavar="maximum_jobs_running",
              type="int", default=30)
@@ -107,8 +108,8 @@ class JobQueue(object):
     def init_dirs(self):
         """Create job directories."""
 
-        if not os.path.exists(self._jobdir):
-            os.mkdir(self._jobdir)
+        if not os.path.exists(self._donedir):
+            os.mkdir(self._donedir)
         if not os.path.exists(self._groupdir):
             os.mkdir(self._groupdir)
 
@@ -201,10 +202,13 @@ class JobQueue(object):
         Read all group jobs.
         """
         return [self.read_job(x)
-                for x in self._get_group_job_files(self._groupdir)]
+                for x in self._get_group_job_files()]
 
 
     def _make_group_input(self, inputs):
+        """
+        Make group job commands.
+        """
         group_input = "_pid=\n"
         group_input += "".join("(\n" + job_input + "\n) & \n_pid=\"$_pid \"$!\n"
                               for job_input in inputs)
@@ -247,6 +251,15 @@ class JobQueue(object):
 
         for job in jobs:
             self.remove_job(job["file"])
+
+    #-----------------------
+    # actions
+
+
+    def clear_jobs(self):
+        """Clear all jobs from queue."""
+        for jobfile in self.get_waiting_jobs():
+            self.remove_jobfile(jobfile)
 
 
     def queue_groups(self):
@@ -319,22 +332,28 @@ if not os.path.exists(config['jobdir']):
 
 
 # setup queue
-jobqueue = JobQueue(jobdir=**config)
+jobqueue = JobQueue(**config)
 
 
+# Process actions.
 if conf.groupjobs:
     # only group jobs
     jobqueue.queue_groups()
+    sys.exit(0)
 
-else if conf.run:
+elif conf.run:
     # start queue process
     jobqueue.run_queue()
     sys.exit(0)
 
-else if conf.list:
+elif conf.list:
     # list groups
-    for i, job in enumerate(self.get_group_jobs()):
+    for i, job in enumerate(jobqueue.get_group_jobs()):
         print "\t".join(map(str, [i+1, job["group"], job.get("time", "")]))
+    sys.exit(0)
+
+elif conf.clear:
+    jobqueue.clear_jobs()
     sys.exit(0)
 
 
@@ -348,6 +367,6 @@ else:
 
 if not conf.group:
     # make simple job
-    self.queue_job(cmd, input_lines)
+    jobqueue.queue_job(cmd, input_lines)
 else:
-    self.queue_group_job(conf.group, conf.groupsize, cmd, input_lines)
+    jobqueue.queue_group_job(conf.group, conf.groupsize, cmd, input_lines)
