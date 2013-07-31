@@ -14,18 +14,16 @@ import tempfile
 import time
 
 # default config
-CURRENT_JOBS_CMD = "squeue"
-WHOAMI_CMD =  "whoami"
-POLL_RATE = 60 # seconds
-JOB_SUBMIT = "/bin/bash"
 JOBDIR = os.environ.get("JOBS_DIR",
                          os.path.join(os.environ["HOME"], "jobs"))
 
-config = {'current_jobs_cmd': CURRENT_JOBS_CMD,
-          'whoami_cmd': WHOAMI_CMD,
-          'poll_rate': POLL_RATE,
-          'job_submit_cmd': JOB_SUBMIT,
-          'jobdir': JOBDIR}
+default_config = {
+    'job_submit_cmd': "/bin/bash",
+    'current_jobs_cmd': "ps aux | grep $(whoami)",
+    'poll_rate': 60,
+    'maxjobs': 30,
+    'groupsize': 16,
+}
 
 o = optparse.OptionParser()
 o.add_option("--nostdin", action="store_true", default=False)
@@ -36,10 +34,11 @@ o.add_option("-c", "--clear", action="store_true")
 #o.add_option("", "--clear-done", action="store_true")
 o.add_option("-G", "--groupjobs", action="store_true")
 o.add_option("-g", "--groupname")
-o.add_option("-s", "--groupsize", default=16, type="int")
+o.add_option("-s", "--groupsize", default=default_config['groupsize'],
+             type="int")
 o.add_option("-d", "--dir", metavar="jobs_directory")
 o.add_option("-j", "--maxjobs", metavar="maximum_jobs_running",
-             type="int", default=30)
+             type="int", default=default_config['maxjobs'])
 
 
 #=============================================================================
@@ -78,49 +77,69 @@ def unique_eof(input_data):
 
 
 class JobQueue(object):
-    def __init__(self, jobdir='jobs',
-                 job_submit_cmd='/bin/bash',
-                 whoami_cmd='whoami',
-                 poll_rate=60,
-                 maxjobs=50,
-                 current_jobs_cmd='',
+    def __init__(self, jobdir='jobs', config={},
                  init_dirs=True):
         self._jobdir = jobdir
-        self._job_submit_cmd = job_submit_cmd
-        self._whoami_cmd = whoami_cmd
-        self._current_jobs_cmd = current_jobs_cmd
-        self._poll_rate = poll_rate
-        self._maxjobs = maxjobs
+        self._config = dict(default_config)
 
         # setup directories
+        self._configdir = os.path.join(self._jobdir, "config")
         self._donedir = os.path.join(self._jobdir, "done")
         self._subjobsdir = os.path.join(self._jobdir, "subjobs")
+        self._configfile = os.path.join(self._configdir, "queuejob.json")
 
         if init_dirs:
             self.init_dirs()
 
+        # setup configuration
+        self._config.update(self.read_config())
+        self._config.update(config)
+
+        self._job_submit_cmd = self._config['job_submit_cmd']
+        self._current_jobs_cmd = self._config['current_jobs_cmd']
+        self._poll_rate = self._config['poll_rate']
+        self._maxjobs = self._config['maxjobs']
+        self._groupsize = self._config['groupsize']
+
 
     def init_dirs(self):
-        """Create job directories."""
+        """Create job directories and config files."""
+        if not os.path.exists(self._configdir):
+            os.mkdir(self._configdir)
         if not os.path.exists(self._donedir):
             os.mkdir(self._donedir)
         if not os.path.exists(self._subjobsdir):
             os.mkdir(self._subjobsdir)
 
+        # Write configuration file.
+        if not os.path.exists(self._configfile):
+            text = json.dumps(self._config)
+            with open(self._configfile, "w") as out:
+                out.write(text)
+            print "Initialized job queue config: %s" % self._configfile
+            print "Please edit for your system"
+            print json.dumps(self._config, sort_keys=True,
+                             indent=4, separators=(',', ': '))
+
+
+    def read_config(self):
+        """Read configuration file"""
+        if os.path.exists(self._configfile):
+            with open(self._configfile) as infile:
+                return json.loads(infile.read())
+        return {}
+
 
     def get_running_num_jobs(self):
         """Return the number of jobs currently running."""
-        user = os.popen(self._whoami_cmd).read().strip()
-
         try:
-            s = Popen(self._current_jobs_cmd, stdout=PIPE)
-            njobs = 0
-            for line in s.stdout:
-                if user in line:
-                    njobs += 1
+            s = Popen(self._current_jobs_cmd, stdout=PIPE, shell=True)
+            njobs = len(list(s.stdout))
+            if s.wait() != 0:
+                raise Exception("Error return code")
             return njobs
         except:
-            raise Exception("cant get number of jobs right now")
+            raise Exception("Cannot get number of jobs right now")
 
 
     def get_waiting_jobs(self):
@@ -319,19 +338,23 @@ if __name__ == '__main__':
     conf, args = o.parse_args()
 
     # setup config
+    config = dict(default_config)
     if conf.dir:
-        config['jobdir'] = conf.dir
-    config['maxjobs'] = conf.maxjobs
+        jobdir = conf.dir
+    else:
+        jobdir = JOBDIR
 
 
     # ensure job directories are present
-    if not os.path.exists(config['jobdir']):
-        print >>sys.stderr, "ERROR: jobs directory '%s' does not exist. Please create it." % config['jobdir']
-        print >>sys.stderr, "  mkdir %s" % config['jobdir']
+    if not os.path.exists(jobdir):
+        print >>sys.stderr, "ERROR: jobs directory '%s' does not exist. Please create it." % jobdir
+        print >>sys.stderr, "  mkdir %s" % jobdir
         sys.exit(1)
 
+    config['maxjobs'] = conf.maxjobs
+
     # setup queue
-    jobqueue = JobQueue(**config)
+    jobqueue = JobQueue(jobdir, config)
 
     # Process actions.
     if conf.groupjobs:
@@ -355,7 +378,7 @@ if __name__ == '__main__':
         jobqueue.clear_jobs()
         print 'all jobs cleared'
 
-    else:
+    elif args:
         # Queue a job.
 
         # Get command and input.
