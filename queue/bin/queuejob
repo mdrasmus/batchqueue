@@ -13,8 +13,8 @@ import sys
 import tempfile
 import time
 
-# config
-CURRENT_JOBS_CMD = "true"
+# default config
+CURRENT_JOBS_CMD = "squeue"
 WHOAMI_CMD =  "whoami"
 POLL_RATE = 60 # seconds
 JOB_SUBMIT = "/bin/bash"
@@ -40,8 +40,6 @@ o.add_option("-s", "--groupsize", default=16, type="int")
 o.add_option("-d", "--dir", metavar="jobs_directory")
 o.add_option("-j", "--maxjobs", metavar="maximum_jobs_running",
              type="int", default=30)
-
-conf, args = o.parse_args()
 
 
 #=============================================================================
@@ -84,7 +82,7 @@ class JobQueue(object):
                  job_submit_cmd='/bin/bash',
                  whoami_cmd='whoami',
                  poll_rate=60,
-                 max_jobs=50,
+                 maxjobs=50,
                  current_jobs_cmd='',
                  init_dirs=True):
         self._jobdir = jobdir
@@ -92,7 +90,7 @@ class JobQueue(object):
         self._whoami_cmd = whoami_cmd
         self._current_jobs_cmd = current_jobs_cmd
         self._poll_rate = poll_rate
-        self._max_jobs = max_jobs
+        self._maxjobs = maxjobs
 
         # setup directories
         self._donedir = os.path.join(self._jobdir, "done")
@@ -171,17 +169,6 @@ class JobQueue(object):
         out.write(cmdstr)
 
 
-    def queue_job(self, cmd, input_data, cwd=None):
-        """
-        Queue a command with input.
-        """
-        prefix = time.strftime("%Y%m%d_%H%M%S_")
-        fd, filename = tempfile.mkstemp(".sh", prefix, self._jobdir)
-        with os.fdopen(fd, "w") as out:
-            self._write_job(out, cmd, input_data, cwd=cwd)
-        return filename
-
-
     def _get_subjob_files(self):
         """
         Get all group jobs.
@@ -209,24 +196,6 @@ class JobQueue(object):
                               for job_input in inputs)
         group_input += "for p in $_pid; do wait $p; done"
         return group_input
-
-
-    def queue_subjob(self, group_name, size, cmd, input_data):
-        """
-        Queue a subjob.
-        """
-        text = json.dumps({"group": group_name,
-                           "size": size,
-                           "cmd": cmd,
-                           "cwd": os.getcwd(),
-                           "time": time.strftime("%Y/%m/%d %H:%M:%S"),
-                           "input": input_data})
-
-        prefix = time.strftime("%Y%m%d_%H%M%S_")
-        fd, filename = tempfile.mkstemp(".json", prefix, self._subjobsdir)
-        os.write(fd, text)
-        os.close(fd)
-        return filename
 
 
     def queue_group(self, jobs):
@@ -257,6 +226,35 @@ class JobQueue(object):
             self.remove_job(jobfile)
 
 
+    def queue_job(self, cmd, input_data, cwd=None):
+        """
+        Queue a command with input.
+        """
+        prefix = time.strftime("%Y%m%d_%H%M%S_")
+        fd, filename = tempfile.mkstemp(".sh", prefix, self._jobdir)
+        with os.fdopen(fd, "w") as out:
+            self._write_job(out, cmd, input_data, cwd=cwd)
+        return filename
+
+
+    def queue_subjob(self, group_name, size, cmd, input_data):
+        """
+        Queue a subjob.
+        """
+        text = json.dumps({"group": group_name,
+                           "size": size,
+                           "cmd": cmd,
+                           "cwd": os.getcwd(),
+                           "time": time.strftime("%Y/%m/%d %H:%M:%S"),
+                           "input": input_data})
+
+        prefix = time.strftime("%Y%m%d_%H%M%S_")
+        fd, filename = tempfile.mkstemp(".json", prefix, self._subjobsdir)
+        os.write(fd, text)
+        os.close(fd)
+        return filename
+
+
     def queue_groups(self):
         """Create groups out of all jobs waiting for grouping"""
 
@@ -273,99 +271,104 @@ class JobQueue(object):
                 self.queue_group(jobs[i:i+group_size])
 
 
-    def run_queue(self, maxjobs=None):
+    def run_queue(self):
         """Poll job queue to create groups and submit jobs"""
 
-        if not maxjobs:
-            maxjobs = self._max_jobs
-
+        # Loop forever.
         while True:
-            # queue groups
-            self.queue_groups()
+            self.pump_queue()
 
+
+    def pump_queue(self):
+        """Process any pending actions on the queue."""
+
+        # queue groups
+        self.queue_groups()
+
+        print
+        print "Check queue", time.strftime("%Y/%m/%d %H:%M:%S")
+
+        # determine jobs
+        jobs = self.get_waiting_jobs()
+        try:
+            ncurrent = self.get_running_num_jobs()
+        except:
+            print "Warning: Could not get number of current jobs, sleeping..."
+            time.sleep(self._poll_rate)
+            return
+
+        nsubmit = min(len(jobs), max(self._maxjobs - ncurrent, 0))
+
+        print "max jobs:", self._maxjobs
+        print "running: ", ncurrent
+        print "waiting: ", len(jobs)
+
+        # submit jobs
+        for i in range(nsubmit):
             print
-            print "check queue", time.strftime("%Y/%m/%d %H:%M:%S")
+            print "> submit %d:" % (i+1), os.path.basename(jobs[i])
+            self.submit_job(jobs[i])
+            self.remove_job(jobs[i])
 
-            # determine jobs
-            jobs = self.get_waiting_jobs()
-            try:
-                ncurrent = self.get_running_num_jobs()
-            except:
-                print "could not get number of current jobs, sleeping"
-                time.sleep(POLL_RATE)
-                continue
-
-            nsubmit = min(len(jobs), max(maxjobs - ncurrent, 0))
-
-            print "max jobs:", maxjobs
-            print "running: ", ncurrent
-            print "waiting: ", len(jobs)
-
-            # submit jobs
-            for i in range(nsubmit):
-                print
-                print "> submit %d:" % (i+1), os.path.basename(jobs[i])
-                self.submit_job(jobs[i])
-                self.remove_job(jobs[i])
-
-            time.sleep(POLL_RATE)
+        time.sleep(self._poll_rate)
 
 
 #=============================================================================
 
-# setup config
-if conf.dir:
-    config['jobdir'] = conf.dir
-config['max_jobs'] = conf.maxjobs
+if __name__ == '__main__':
+    conf, args = o.parse_args()
+
+    # setup config
+    if conf.dir:
+        config['jobdir'] = conf.dir
+    config['maxjobs'] = conf.maxjobs
 
 
-# ensure job directories are present
-if not os.path.exists(config['jobdir']):
-    print >>sys.stderr, "ERROR: jobs directory '%s' does not exist. Please create it." % config['jobdir']
-    print >>sys.stderr, "  mkdir %s" % config['jobdir']
-    sys.exit(1)
+    # ensure job directories are present
+    if not os.path.exists(config['jobdir']):
+        print >>sys.stderr, "ERROR: jobs directory '%s' does not exist. Please create it." % config['jobdir']
+        print >>sys.stderr, "  mkdir %s" % config['jobdir']
+        sys.exit(1)
 
+    # setup queue
+    jobqueue = JobQueue(**config)
 
-# setup queue
-jobqueue = JobQueue(**config)
+    # Process actions.
+    if conf.groupjobs:
+        # Group together jobs.
+        jobqueue.queue_groups()
 
+    elif conf.run:
+        # Start queue process.
+        jobqueue.run_queue()
 
-# Process actions.
-if conf.groupjobs:
-    # only group jobs
-    jobqueue.queue_groups()
-    sys.exit(0)
+    elif conf.list:
+        # List all queued jobs.
+        for i, job in enumerate(jobqueue.get_waiting_jobs()):
+            print "\t".join(["job", str(i+1), job])
+        for i, job in enumerate(jobqueue.get_subjobs()):
+            print "\t".join(map(str, ["subjob", i+1, job["group"],
+                                      job.get("time", "")]))
 
-elif conf.run:
-    # start queue process
-    jobqueue.run_queue()
-    sys.exit(0)
+    elif conf.clear:
+        # Clear all queued jobs.
+        jobqueue.clear_jobs()
+        print 'all jobs cleared'
 
-elif conf.list:
-    # list subjobs
-    for i, job in enumerate(jobqueue.get_waiting_jobs()):
-        print "\t".join(["job", str(i+1), job])
-    for i, job in enumerate(jobqueue.get_subjobs()):
-        print "\t".join(map(str, ["subjob", i+1, job["group"],
-                                  job.get("time", "")]))
-    sys.exit(0)
+    else:
+        # Queue a job.
 
-elif conf.clear:
-    jobqueue.clear_jobs()
-    print 'all jobs cleared'
-    sys.exit(0)
+        # Get command and input.
+        cmd = args
+        if not conf.nostdin:
+            input_data = sys.stdin.read()
+        else:
+            input_data = ''
 
-
-# get command and input
-cmd = args
-if not conf.nostdin:
-    input_data = sys.stdin.read()
-else:
-    input_data = ''
-
-
-if not conf.groupname:
-    # make simple job
-    jobqueue.queue_job(cmd, input_data)
-else:
-    jobqueue.queue_subjob(conf.groupname, conf.groupsize, cmd, input_data)
+        if not conf.groupname:
+            # Make simple job.
+            jobqueue.queue_job(cmd, input_data)
+        else:
+            # Make a subjob that is groupable.
+            jobqueue.queue_subjob(
+                conf.groupname, conf.groupsize, cmd, input_data)
