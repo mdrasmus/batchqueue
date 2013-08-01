@@ -13,7 +13,7 @@ import sys
 import tempfile
 import time
 
-# default config
+# Default config.
 JOBDIR = os.environ.get("JOBS_DIR",
                          os.path.join(os.environ["HOME"], "jobs"))
 
@@ -46,7 +46,9 @@ o.add_option("-j", "--maxjobs", metavar="maximum_jobs_running",
 
 
 def doublequote(text):
-    """Wrap argument in doublequotes with propper escaping."""
+    """
+    Wrap argument in doublequotes with propper escaping.
+    """
     return '"' + text.replace("\\", "\\\\").replace('"', '\\"').replace("$", "\\$") + '"'
 
 
@@ -189,9 +191,7 @@ class JobQueue(object):
 
 
     def _get_subjob_files(self):
-        """
-        Get all group jobs.
-        """
+        """Get all group jobs."""
         files = [os.path.join(self._subjobsdir, x)
                  for x in os.listdir(self._subjobsdir)]
         files.sort()
@@ -199,17 +199,13 @@ class JobQueue(object):
 
 
     def get_subjobs(self):
-        """
-        Read all group jobs.
-        """
+        """Read all group jobs."""
         return [self._read_job(x)
                 for x in self._get_subjob_files()]
 
 
     def _make_group_input(self, inputs):
-        """
-        Make group job commands.
-        """
+        """Make group job commands."""
         group_input = "_pid=\n"
         group_input += "".join("(\n" + job_input + "\n) & \n_pid=\"$_pid \"$!\n"
                               for job_input in inputs)
@@ -246,9 +242,7 @@ class JobQueue(object):
 
 
     def queue_job(self, cmd, input_data, cwd=None):
-        """
-        Queue a command with input.
-        """
+        """Queue a command with input."""
         prefix = time.strftime("%Y%m%d_%H%M%S_")
         fd, filename = tempfile.mkstemp(".sh", prefix, self._jobdir)
         with os.fdopen(fd, "w") as out:
@@ -257,9 +251,7 @@ class JobQueue(object):
 
 
     def queue_subjob(self, group_name, size, cmd, input_data):
-        """
-        Queue a subjob.
-        """
+        """Queue a subjob."""
         text = json.dumps({"group": group_name,
                            "size": size,
                            "cmd": cmd,
@@ -337,15 +329,14 @@ class JobQueue(object):
 if __name__ == '__main__':
     conf, args = o.parse_args()
 
-    # setup config
+    # Setup config.
     config = dict(default_config)
     if conf.dir:
         jobdir = conf.dir
     else:
         jobdir = JOBDIR
 
-
-    # ensure job directories are present
+    # Ensure job directories are present.
     if not os.path.exists(jobdir):
         print >>sys.stderr, "ERROR: jobs directory '%s' does not exist. Please create it." % jobdir
         print >>sys.stderr, "  mkdir %s" % jobdir
@@ -353,7 +344,7 @@ if __name__ == '__main__':
 
     config['maxjobs'] = conf.maxjobs
 
-    # setup queue
+    # Setup queue.
     jobqueue = JobQueue(jobdir, config)
 
     # Process actions.
