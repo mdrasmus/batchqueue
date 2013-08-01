@@ -1,0 +1,143 @@
+#!/usr/bin/env python
+
+import os
+import sys
+import time
+from subprocess import call
+import tempfile
+import optparse
+import json
+import shutil
+
+# config
+JOBSDIR = os.environ["HOME"] + "/jobs"
+
+
+o = optparse.OptionParser()
+o.add_option("-l", "--list", action="store_true")
+o.add_option("-g", "--group")
+o.add_option("-s", "--groupsize", default=8)
+
+conf, args = o.parse_args()
+
+
+#=============================================================================
+
+def doublequote(text):
+    """Wrap argument in doublequotes with propper escaping"""
+    return '"' + text.replace("\\", "\\\\").replace('"', '\\"').replace("$", "\\$") + '"'
+
+
+def make_cmdstr(cmd):
+    return " ".join(doublequote(x) for x in cmd)
+
+
+def unique_eof(lines):
+    if ("EOF\n" not in lines) and ("EOF" not in lines):
+        return "EOF"
+
+    i = 2
+    while True:
+        eof = "EOF%d" % i
+        if (eofstr + "\n" not in lines) and (eofstr not in lines):
+            return eofstr
+        i += 1
+
+
+def write_simple_job(fd, cmd, input_lines):
+    cmdstr = make_cmdstr(cmd)
+    if input_lines:
+        eof = unique_eof(input_lines)
+        cmdstr += " <<\"" + eof + "\"\n" + \
+             "".join(input_lines) + "\n" + eof
+    
+    os.write(fd, "# submitted: %s\n" % time.strftime("%Y/%m/%d %H:%M:%S"))
+    os.write(fd, "cd %s\n" % doublequote(os.getcwd()))
+    os.write(fd, cmdstr)
+
+
+def make_simple_job(jobsdir, cmd, input_lines):
+    prefix = time.strftime("%Y%m%d_%H%M%S_")
+    fd, name = tempfile.mkstemp(".sh", prefix, jobsdir)
+    write_simple_job(fd, cmd, input_lines)
+    os.close(fd)
+
+
+def make_group_job(groupdir, group, cmd, input_lines):
+    text = json.dumps({"group": group,
+                       "cmd": cmd,
+                       "input": "".join(input_lines)})
+
+    prefix = time.strftime("%Y%m%d_%H%M%S_")
+    fd, name = tempfile.mkstemp(".json", prefix, groupdir)
+    os.write(fd, text)
+    os.close(fd)
+
+
+def read_job(jobfile):
+    job = json.loads(open(jobfile).read())
+    job["file"] = jobfile
+    return job
+
+
+def get_job_files_for_grouping(groupdir):
+    files = [os.path.join(groupdir, x) for x in os.listdir(groupdir)]
+    files.sort()
+    return files
+
+def get_jobs_for_grouping(groupdir):
+    return [read_job(x) for x in get_job_files_for_grouping(groupdir)]
+
+def make_group_input(inputs):
+    group_input = "_pid=\n"
+    group_input += "".join("(\n" + job_input + "\n) & \n_pid=\"$_pid \"$!\n"
+                          for job_input in inputs)
+    group_input += "for p in $_pid; do wait $p; done"
+    return group_input
+
+def split_lines(text):
+    return [line + "\n" for line in text.split("\n")]
+
+def remove_job_for_group(donedir, job):
+    shutil.move(job, donedir)
+    
+
+#=============================================================================
+
+# ensure job directories are present
+jobsdir = JOBSDIR
+groupdir = os.path.join(jobsdir, "groups")
+donedir = os.path.join(jobsdir, "done")
+
+if not os.path.exists(jobsdir):
+    os.mkdir(jobsdir)
+if not os.path.exists(groupdir):
+    os.mkdir(groupdir)
+if not os.path.exists(donedir):
+    os.mkdir(donedir)
+
+
+if conf.list:
+    # list groups
+    for i, job in enumerate(get_jobs_for_grouping(groupdir)):
+        print "\t".join(map(str, [i+1, job["group"], job.get("time", "")]))
+    
+else:
+    assert conf.group
+
+    jobs = [x for x in get_jobs_for_grouping(groupdir)
+            if x["group"] == conf.group]
+
+    for i in range(0, len(jobs), conf.groupsize):
+        jobs2 = jobs[i:i+conf.groupsize]
+
+        cmd = jobs2[0]["cmd"]
+        inputs = [j["input"] for j in jobs2]
+
+        group_input = make_group_input(inputs)
+        input_lines = split_lines(group_input)
+        make_simple_job(jobsdir, cmd, input_lines)
+
+        for job in jobs2:
+            remove_job_for_group(donedir, job["file"])
+

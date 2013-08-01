@@ -1,0 +1,11 @@
+#!/bin/sh
+
+GROUP="$1"
+OUT="$2"
+
+(while read CMD; do
+    queuejob -g "$GROUP" -- mysub -k oe -o "$OUT" <<EOF
+$CMD
+EOF
+done)
+

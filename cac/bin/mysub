@@ -1,0 +1,8 @@
+#!/bin/bash
+
+(echo 'cd "$PBS_O_WORKDIR"' ; cat) | qsub \
+    -A acs4_0001 \
+    -l nodes=1,walltime=24:00:00 \
+    -j oe \
+    -q v4 "$@"
+
